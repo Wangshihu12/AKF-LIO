@@ -28,10 +28,32 @@ namespace akf_lio
     constexpr float DEFAULT_MIN_VOXEL_SIZE = 0.2;
     constexpr double DEFAULT_INITIAL_THRESHOLD = 3.0;
 
-    // Efficient hash function for 3D grid indices - using same as ivox hash_vec<3>
+    /**
+     * [功能描述]：计算3D体素坐标的哈希值，用于空间索引和快速查找
+     * @param x：体素在X轴方向的整数坐标
+     * @param y：体素在Y轴方向的整数坐标  
+     * @param z：体素在Z轴方向的整数坐标
+     * @return 返回体素坐标对应的哈希值，范围在[0, 9999999]内
+     * 
+     * 该函数使用优化的空间哈希算法，将3D坐标映射到1D哈希表索引
+     * 基于"Optimized Spatial Hashing for Collision Detection"论文中的哈希函数
+     * 与iVox的hash_vec<3>使用相同的哈希策略，确保一致性
+     */
     inline size_t ComputeVoxelHash(int64_t x, int64_t y, int64_t z)
     {
-        // Using same hash function as ivox hash_vec<3>: Optimized Spatial Hashing for Collision Detection
+        // 使用与iVox hash_vec<3>相同的哈希函数：碰撞检测的优化空间哈希
+        // 
+        // 哈希策略：
+        // 1. 对每个坐标分量乘以不同的大质数，确保良好的分布特性
+        //    - x * 73856093：X轴分量的哈希权重
+        //    - y * 471943：  Y轴分量的哈希权重  
+        //    - z * 83492791：Z轴分量的哈希权重
+        // 
+        // 2. 使用异或操作(^)组合各分量的哈希值
+        //    异或操作能够有效混合不同分量的信息，减少哈希冲突
+        //
+        // 3. 对结果取模10000000，将哈希值限制在合理范围内
+        //    这个范围提供了足够的哈希桶数量，平衡内存使用和冲突率
         return size_t(((x) * 73856093) ^ ((y) * 471943) ^ ((z) * 83492791)) % 10000000;
     }
 
