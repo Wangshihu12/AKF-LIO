@@ -154,18 +154,24 @@ namespace akf_lio
         nh.param<std::string>("common/lid_topic", lidar_topic, "/livox/lidar");
         nh.param<std::string>("common/imu_topic", imu_topic, "/livox/imu");
 
-        if (preprocess_->GetLidarType() == LidarType::AVIA)
-        {
-            sub_pcl_ = nh.subscribe<livox_ros_driver::CustomMsg>(
-                lidar_topic, 200000, [this](const livox_ros_driver::CustomMsg::ConstPtr &msg)
-                { LivoxPCLCallBack(msg); });
-        }
-        else
-        {
-            sub_pcl_ = nh.subscribe<sensor_msgs::PointCloud2>(
-                lidar_topic, 200000, [this](const sensor_msgs::PointCloud2::ConstPtr &msg)
-                { StandardPCLCallBack(msg); });
-        }
+        // if (preprocess_->GetLidarType() == LidarType::AVIA)
+        // {
+        //     sub_pcl_ = nh.subscribe<livox_ros_driver::CustomMsg>(
+        //         lidar_topic, 200000, [this](const livox_ros_driver::CustomMsg::ConstPtr &msg)
+        //         { LivoxPCLCallBack(msg); });
+        // }
+        // else
+        // {
+        //     sub_pcl_ = nh.subscribe<sensor_msgs::PointCloud2>(
+        //         lidar_topic, 200000, [this](const sensor_msgs::PointCloud2::ConstPtr &msg)
+        //         { StandardPCLCallBack(msg); });
+        // }
+
+        sub_pcl_ = nh.subscribe<sensor_msgs::PointCloud2>(
+            lidar_topic, 200000, [this](const sensor_msgs::PointCloud2::ConstPtr &msg)
+            { StandardPCLCallBack(msg); });
+
+        sub_motor = nh.subscribe("/multi_motor", 200000, &LaserMapping::motor_cbk, this);
 
         sub_imu_ = nh.subscribe<sensor_msgs::Imu>(imu_topic, 200000,
                                                   [this](const sensor_msgs::Imu::ConstPtr &msg)
@@ -663,9 +669,12 @@ namespace akf_lio
                     lidar_buffer_.clear();
                 }
 
+                sensor_msgs::PointCloud2::Ptr msg_in(new sensor_msgs::PointCloud2(*msg));
+
                 PointCloudType::Ptr ptr(new PointCloudType());
-                preprocess_->Process(msg, ptr);
+                // preprocess_->Process(msg, ptr);
                 lidar_buffer_.push_back(ptr);
+                lidar_msg_buffer_.push_back(msg_in);
                 time_buffer_.push_back(msg->header.stamp.toSec());
                 last_timestamp_lidar_ = msg->header.stamp.toSec();
             },
@@ -728,6 +737,40 @@ namespace akf_lio
         mtx_buffer_.unlock();
     }
 
+    void LaserMapping::motor_cbk(const motor::MultiMotor::ConstPtr &msg_in)
+    {
+        for (int i = 0; i < msg_in->motor_frames.size(); i++)
+        {
+            nav_msgs::Odometry::Ptr msg(new nav_msgs::Odometry());
+            msg->header = msg_in->motor_frames[i].header;
+            msg->twist.twist.angular.x = msg_in->motor_frames[i].angle_encoder;
+            double timestamp = msg->header.stamp.toSec();
+
+            mtx_motor_buffer.lock();
+            if (timestamp < last_timestamp_motor)
+            {
+                LOG(WARNING) << "motor loop back, clear buffer";
+
+                // // 从后向前遍历，移除时间戳大于目标值的元素
+                // while (!motor_buffer.empty()
+                //       && motor_buffer.back()->header.stamp.toSec() > timestamp
+                //       && abs(last_timestamp_motor - timestamp) < 0.02)
+
+                if (fabs(last_timestamp_motor - timestamp) < 0.02)
+                {
+                    last_timestamp_motor = motor_buffer.back()->header.stamp.toSec();
+                    motor_buffer.pop_back(); // 移除尾部元素
+                }
+                mtx_motor_buffer.unlock();
+                return;
+                // motor_buffer.clear();
+            }
+            last_timestamp_motor = timestamp;
+            motor_buffer.emplace_back(msg);
+            mtx_motor_buffer.unlock();
+        }
+    }
+
     /**
      * [功能描述]：同步激光雷达和IMU传感器数据，确保时间对齐
      * @return 如果成功同步数据包返回true，否则返回false
@@ -744,9 +787,31 @@ namespace akf_lio
             return false;
         }
 
+        // 去除 lidar 前 0.5s 的 motor 数据
+        mtx_motor_buffer.lock();
+        while (motor_buffer.size() > 0 && motor_buffer.front()->header.stamp.toSec() < time_buffer_.front() - 0.5)
+        {
+            motor_buffer.pop_front();
+        }
+        mtx_motor_buffer.unlock();
+
+        if (motor_buffer.empty())
+        {
+            // std::cout << "motor_buffer.empty()" << std::endl;
+            return false;
+        }
+
+        if (time_buffer_.front() > motor_buffer.back()->header.stamp.toSec() + 0.5)
+        {
+            // std::cout << "time_buffer_.front() > motor_buffer.back()->header.stamp.toSec() + 0.5" << std::endl;
+            return false;
+        }
+
         /*** 处理激光雷达扫描数据 ***/
         if (!lidar_pushed_)
         {
+            preprocess_->xt32_motor_handler(lidar_msg_buffer_.front(), motor_buffer, lidar_buffer_.front());
+
             // 从缓冲区获取最前面的激光雷达数据
             measures_.lidar_ = lidar_buffer_.front();
             measures_.lidar_bag_time_ = time_buffer_.front();  // 激光雷达数据包的到达时间
@@ -810,8 +875,17 @@ namespace akf_lio
             imu_buffer_.pop_front();
         }
 
+        // 去除 lidar 后末尾点时间之前 6s 的 motor 数据
+        mtx_motor_buffer.lock();
+        while (motor_buffer.size() > 0 && motor_buffer.front()->header.stamp.toSec() < measures_.lidar_end_time_ - 6)
+        {
+            motor_buffer.pop_front();
+        }
+        mtx_motor_buffer.unlock();
+
         // 清理已处理的激光雷达数据
         lidar_buffer_.pop_front();  // 移除激光雷达数据
+        lidar_msg_buffer_.pop_front();
         time_buffer_.pop_front();   // 移除对应的时间戳
         lidar_pushed_ = false;      // 重置激光雷达推送标志，准备处理下一帧
 

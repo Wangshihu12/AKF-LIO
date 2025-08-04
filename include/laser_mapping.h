@@ -16,6 +16,8 @@
 #include "options.h"
 #include "pointcloud_preprocess.h"
 
+#include "motor/MultiMotor.h"
+
 namespace akf_lio
 {
 
@@ -84,6 +86,7 @@ namespace akf_lio
         void StandardPCLCallBack(const sensor_msgs::PointCloud2::ConstPtr &msg);
         void LivoxPCLCallBack(const livox_ros_driver::CustomMsg::ConstPtr &msg);
         void IMUCallBack(const sensor_msgs::Imu::ConstPtr &msg_in);
+        void motor_cbk(const motor::MultiMotor::ConstPtr &msg_in);
 
         // sync lidar with imu
         bool SyncPackages();
@@ -220,6 +223,13 @@ namespace akf_lio
         geometry_msgs::PoseStamped msg_body_pose_;
 
         double init_uncertainty_ = 0.01;
+
+        // motor 相关
+        double last_timestamp_motor = -1.0;
+        std::mutex mtx_motor_buffer;
+        std::deque<nav_msgs::Odometry::ConstPtr> motor_buffer;
+        std::deque<sensor_msgs::PointCloud2::Ptr> lidar_msg_buffer_; // 点云消息队列
+        ros::Subscriber sub_motor;
     };
 
 } // namespace akf_lio

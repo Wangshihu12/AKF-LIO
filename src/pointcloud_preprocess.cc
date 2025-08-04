@@ -123,6 +123,94 @@ double range = cloud_full_[i].x * cloud_full_[i].x + cloud_full_[i].y * cloud_fu
         }
     }
 
+    void PointCloudPreprocess::xt32_motor_handler(
+        const sensor_msgs::PointCloud2::ConstPtr &msg,
+        const std::deque<nav_msgs::Odometry::ConstPtr> &angle_msgs,
+        PointCloudType::Ptr &pcl_out
+    )
+    {
+        pcl_out->points.clear();
+        cloud_full_.clear();
+        pcl::PointCloud<xt32_ros::Point> pl_orig;
+        pcl::fromROSMsg(*msg, pl_orig);
+        int plsize = pl_orig.size();
+        pcl_out->points.reserve(plsize);
+
+        double time_head = pl_orig.points[0].timestamp; // 获取第一个点的时间戳
+
+        for (int i = 0; i < plsize; i++)
+        {
+            PointType2 added_pt;
+            added_pt.normal_x = 0;                                                   // 设置点云法线x
+            added_pt.normal_y = 0;                                                   // 设置点云法线y
+            added_pt.normal_z = 0;                                                   // 设置点云法线z
+            added_pt.x = pl_orig.points[i].x;                                        // 设置点云x坐标
+            added_pt.y = pl_orig.points[i].y;                                        // 设置点云y坐标
+            added_pt.z = pl_orig.points[i].z;                                        // 设置点云z坐标
+            added_pt.intensity = pl_orig.points[i].intensity;                        // 设置点云强度
+            added_pt.curvature = (pl_orig.points[i].timestamp - time_head) * 1000.f; // 设置曲率
+
+            if (i % point_filter_num_ == 0) // 如果点满足滤波条件
+            {
+                double range = pl_orig.points[i].x * pl_orig.points[i].x + pl_orig.points[i].y * pl_orig.points[i].y +
+                               pl_orig.points[i].z * pl_orig.points[i].z;
+
+                if (range < (blind_ * blind_) || range > max_range_ * max_range_)
+                    continue;
+                // if (added_pt.x * added_pt.x + added_pt.y * added_pt.y + added_pt.z * added_pt.z > blind_sqr) // 如果点不在盲区内
+                {
+
+#pragma region 电机矫正点云
+                    {
+                        double point_timestamp = msg->header.stamp.toSec() + added_pt.curvature / double(1000);
+
+                        auto angle_msg_iter = std::lower_bound(angle_msgs.begin(), angle_msgs.end(), point_timestamp,
+                                                            [](const nav_msgs::Odometry::ConstPtr &angle_msg, double timestamp)
+                                                            {
+                                                                return angle_msg->header.stamp.toSec() < timestamp;
+                                                            });
+
+                        // cout << "point_timestamp:" << point_timestamp << endl;
+                        // cout << "angle_msg_iter:" << angle_msg_iter->header.stamp.toSec() << endl;
+
+                        nav_msgs::Odometry::ConstPtr angle1 = nullptr;
+                        if (angle_msg_iter == angle_msgs.end())
+                        {
+                        // No angle_msg has a timestamp greater than the point timestamp
+                        // So, we'll use the last angle message
+                        if (angle_msgs.size() > 1)
+                            angle1 = *(angle_msg_iter - 1);
+                        }
+                        else
+                        {
+                        // We're between two angle messages
+                        angle1 = *(angle_msg_iter - 1);
+                        }
+
+                        // cout << "point_timestamp:" << point_timestamp << endl;
+                        // cout << "angle1:" << angle1->header.stamp.toSec() << endl;
+
+                        if (angle1)
+                        {
+
+                            // 解密电机角度低精度电机
+                            double angle_1 = int_dencypt((int)angle1->twist.twist.angular.x, 447703, 4582607) * (360.0 / 65536.0);
+
+                            MotorData interpolated_motor_data;
+
+                            interpolated_motor_data.angle = angle_1;
+
+                            undistortPointByMotor(added_pt, interpolated_motor_data);
+
+                            pcl_out->points.push_back(added_pt);
+                        }
+                    }
+#pragma endregion
+                }
+            }
+        }
+    }
+
     void PointCloudPreprocess::VelodyneHandler(const sensor_msgs::PointCloud2::ConstPtr &msg)
     {
         cloud_out_.clear();
