@@ -728,62 +728,94 @@ namespace akf_lio
         mtx_buffer_.unlock();
     }
 
+    /**
+     * [功能描述]：同步激光雷达和IMU传感器数据，确保时间对齐
+     * @return 如果成功同步数据包返回true，否则返回false
+     * 
+     * 该函数实现多传感器数据的时间同步，将激光雷达扫描期间的所有IMU数据打包
+     * 为后续的运动补偿和状态估计提供时间对齐的数据
+     */
     bool LaserMapping::SyncPackages()
     {
+        // 检查激光雷达和IMU缓冲区是否都有数据
+        // 如果任一缓冲区为空，则无法进行同步
         if (lidar_buffer_.empty() || (imu_buffer_.empty()))
         {
             return false;
         }
 
-        /*** push a lidar scan ***/
+        /*** 处理激光雷达扫描数据 ***/
         if (!lidar_pushed_)
         {
+            // 从缓冲区获取最前面的激光雷达数据
             measures_.lidar_ = lidar_buffer_.front();
-            measures_.lidar_bag_time_ = time_buffer_.front();
+            measures_.lidar_bag_time_ = time_buffer_.front();  // 激光雷达数据包的到达时间
 
+            // 处理点云数量异常的情况
             if (measures_.lidar_->points.size() <= 1)
             {
                 LOG(WARNING) << "Too few input point cloud!";
+                // 点云数量过少，使用平均扫描时间作为扫描持续时间
                 lidar_end_time_ = measures_.lidar_bag_time_ + lidar_mean_scantime_;
             }
+            // 检查点云中最后一个点的时间戳是否合理
             else if (measures_.lidar_->points.back().curvature / double(1000) < 0.5 * lidar_mean_scantime_)
             {
+                // 如果最后一个点的时间戳过小（可能是数据异常），使用平均扫描时间
                 lidar_end_time_ = measures_.lidar_bag_time_ + lidar_mean_scantime_;
             }
             else
             {
-                scan_num_++;
+                // 正常情况：使用点云中最后一个点的时间戳计算扫描结束时间
+                scan_num_++;  // 增加扫描帧计数
+                
+                // 激光雷达扫描结束时间 = 数据包开始时间 + 最后一个点的时间偏移
+                // curvature字段存储的是点的时间偏移（以毫秒为单位）
                 lidar_end_time_ = measures_.lidar_bag_time_ + measures_.lidar_->points.back().curvature / double(1000);
+                
+                // 使用递增平均法更新平均扫描时间
                 lidar_mean_scantime_ +=
                     (measures_.lidar_->points.back().curvature / double(1000) - lidar_mean_scantime_) / scan_num_;
             }
 
+            // 设置测量组中的激光雷达结束时间
             measures_.lidar_end_time_ = lidar_end_time_;
-            lidar_pushed_ = true;
+            lidar_pushed_ = true;  // 标记激光雷达数据已处理
         }
 
+        // 检查IMU数据是否覆盖了整个激光雷达扫描期间
+        // 如果最新的IMU时间戳早于激光雷达结束时间，说明IMU数据不足
         if (last_timestamp_imu_ < lidar_end_time_)
         {
-            return false;
+            return false;  // 等待更多IMU数据
         }
 
-        /*** push imu_ data, and pop from imu_ buffer ***/
-
+        /*** 收集IMU数据，并从IMU缓冲区中移除 ***/
+        
         double imu_time = imu_buffer_.front()->header.stamp.toSec();
-        measures_.imu_.clear();
+        measures_.imu_.clear();  // 清空测量组中的IMU数据
+        
+        // 收集激光雷达扫描期间的所有IMU数据
         while ((!imu_buffer_.empty()) && (imu_time < lidar_end_time_))
         {
             imu_time = imu_buffer_.front()->header.stamp.toSec();
+            
+            // 如果当前IMU时间超过激光雷达结束时间，停止收集
             if (imu_time > lidar_end_time_)
                 break;
+                
+            // 将IMU数据添加到测量组中
             measures_.imu_.push_back(imu_buffer_.front());
+            // 从缓冲区中移除已处理的IMU数据
             imu_buffer_.pop_front();
         }
 
-        lidar_buffer_.pop_front();
-        time_buffer_.pop_front();
-        lidar_pushed_ = false;
-        return true;
+        // 清理已处理的激光雷达数据
+        lidar_buffer_.pop_front();  // 移除激光雷达数据
+        time_buffer_.pop_front();   // 移除对应的时间戳
+        lidar_pushed_ = false;      // 重置激光雷达推送标志，准备处理下一帧
+
+        return true;  // 成功同步数据包
     }
 
     /**
